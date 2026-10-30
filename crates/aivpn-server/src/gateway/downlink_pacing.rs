@@ -15,8 +15,8 @@ use aivpn_common::pacing::{AdaptivePacer, PacingMode};
 use aivpn_common::protocol::MAX_PACKET_SIZE;
 use tokio::time::Instant;
 
-const MAX_PACKETS_PER_SESSION: usize = 64;
-const MAX_PACKETS_TOTAL: usize = 4096;
+const MAX_PACKETS_PER_SESSION: usize = 256; // DSH: 64 -> 256
+const MAX_PACKETS_TOTAL: usize = 8192; // DSH: 4096 -> 8192
 const MAX_CACHED_STREAMS: usize = 1024;
 const LIGHT_MAX_DELAY: Duration = Duration::from_millis(2);
 
