@@ -29,7 +29,7 @@ use smoltcp::wire::DnsQueryType as DnsType;
 
 /// MTU: совпадает с WAN_SAFE_TUN_MTU в tunnel.rs
 const PROXY_MTU: usize = 1280;
-const TCP_BUF: usize = 65536;
+const TCP_BUF: usize = 262144; // DSH: 64 KiB -> 256 KiB (throughput patch)
 const UDP_PACKET_BUF: usize = 128;
 const UDP_PAYLOAD_BUF: usize = 65536;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
