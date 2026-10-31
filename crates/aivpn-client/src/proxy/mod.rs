@@ -30,6 +30,10 @@ use smoltcp::wire::DnsQueryType as DnsType;
 /// MTU: совпадает с WAN_SAFE_TUN_MTU в tunnel.rs
 const PROXY_MTU: usize = 1280;
 const TCP_BUF: usize = 262144; // DSH: 64 KiB -> 256 KiB (throughput patch)
+/// DSH throughput patch v2: receive (downlink) window 1 MiB so a single TCP
+/// stream is not capped by window/RTT on a 100-180 ms lossy WAN path.
+const TCP_RX_BUF: usize = 1048576;
+const TCP_TX_BUF: usize = TCP_BUF;
 const UDP_PACKET_BUF: usize = 128;
 const UDP_PAYLOAD_BUF: usize = 65536;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -348,8 +352,8 @@ fn run_stack(
         loop {
             match cmd_rx.try_recv() {
                 Ok(nc) => {
-                    let rx_buf = TcpSocketBuffer::new(vec![0u8; TCP_BUF]);
-                    let tx_buf = TcpSocketBuffer::new(vec![0u8; TCP_BUF]);
+                    let rx_buf = TcpSocketBuffer::new(vec![0u8; TCP_RX_BUF]);
+                    let tx_buf = TcpSocketBuffer::new(vec![0u8; TCP_TX_BUF]);
                     let mut socket = TcpSocket::new(rx_buf, tx_buf);
                     socket.set_ack_delay(None);
                     socket.set_nagle_enabled(false);
