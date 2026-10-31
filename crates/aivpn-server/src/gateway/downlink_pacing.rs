@@ -974,21 +974,26 @@ mod tests {
         let due = t0 + sampled_delay(10.0);
         assert_eq!(pacer.pop_ready(due).unwrap().packet.len(), MAX_PACKET_SIZE);
 
-        for n in 0..64 {
+        // DSH: лимиты берём из констант, а не из литералов, чтобы тест
+        // не ломался при изменении размеров очередей.
+        let per_session = MAX_PACKETS_PER_SESSION;
+        let extra_streams = (MAX_PACKETS_TOTAL - per_session) / per_session;
+        for n in 0..per_session {
             assert!(pacer.enqueue(first, &mask, vec![n as u8], due, false));
         }
         assert!(!pacer.enqueue(first, &mask, vec![99], due, false));
-        for session in 2..65u32 {
-            for n in 0..64u8 {
-                assert!(pacer.enqueue(sid_at(session), &mask, vec![n], due, false));
+        for session in 2..(2 + extra_streams as u32) {
+            for n in 0..per_session {
+                assert!(pacer.enqueue(sid_at(session), &mask, vec![n as u8], due, false));
             }
         }
-        assert!(!pacer.enqueue(sid_at(65), &mask, vec![1], due, false));
+        let blocked = 2 + extra_streams as u32;
+        assert!(!pacer.enqueue(sid_at(blocked), &mask, vec![1], due, false));
         assert!(!pacer.enqueue(first, &mask, vec![1], due, false));
 
-        // Смена профиля освобождает 64 места и уменьшает общий счетчик.
+        // Смена профиля освобождает per_session мест и уменьшает общий счётчик.
         assert!(pacer.enqueue(first, &mask_b, vec![7], due, false));
-        assert!(pacer.enqueue(sid_at(65), &mask, vec![1], due, false));
+        assert!(pacer.enqueue(sid_at(blocked), &mask, vec![1], due, false));
         let changed = pacer.pop_ready(due + sampled_delay(10.0)).unwrap();
         assert_eq!(changed.session_id, first);
         assert_eq!(changed.packet, vec![7]);
