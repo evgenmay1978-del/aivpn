@@ -775,9 +775,14 @@ impl super::Gateway {
                             return Ok(());
                         }
                         // Живому endpoint оставляем одну новую попытку в секунду.
+                        // Метку ставим ОДИН раз и не продлеваем на каждом ретрае клиента:
+                        // иначе окно никогда не истекает, пока жив старый сеанс, и клиент
+                        // сидит в чёрной дыре до самого idle_timeout (30 с) — DSH fix.
                         if peer_has_session() {
-                            self.handshake_cooldowns
-                                .insert(client_addr, (0, Instant::now()));
+                            if !self.handshake_cooldowns.contains_key(&client_addr) {
+                                self.handshake_cooldowns
+                                    .insert(client_addr, (0, Instant::now()));
+                            }
                             return Err(Error::InvalidPacket(
                                 "Stale packet from an established peer",
                             ));
