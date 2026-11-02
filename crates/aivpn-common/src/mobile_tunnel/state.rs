@@ -78,6 +78,47 @@ pub const DATA_STALL_WINDOW: Duration = Duration::from_secs(30);
 /// flows. A genuinely dead downlink still fires on the second consecutive
 /// tick — seconds after the 20 s stall verdict, nowhere near the 120 s net.
 pub const DATA_STALL_STRIKES_TO_FIRE: u32 = 2;
+/// Slow data-stall tier. The fast tier above needs ≥4 KiB inside one 30 s
+/// window; a dead downlink under light use stays BELOW it forever, because
+/// TCP/QUIC back off once ACKs stop coming (observed live 02.11.2026: a
+/// phone sent ~128 B/s of unanswered uplink DATA for 14 minutes — 3.8 KiB
+/// per 30 s window, washed every window, never condemned, while keepalive
+/// acks kept RX_SILENCE away). The slow tier uses a long window that the
+/// fast-tier wash does NOT reset: no downlink DATA for a whole
+/// DATA_STALL_LONG_WINDOW while ≥DATA_STALL_LONG_MIN_BYTES of uplink DATA
+/// went out (~68 B/s sustained). Idle junk (~48 B per ~7 s ≈ 620 B) and
+/// one-way telemetry (~18 B/s ≈ 1.6 KiB) stay far below it. A window that
+/// ends below the byte floor simply restarts, so detection takes one to two
+/// windows (90–180 s) instead of never.
+pub const DATA_STALL_LONG_WINDOW: Duration = Duration::from_secs(90);
+pub const DATA_STALL_LONG_MIN_BYTES: u64 = 6 * 1024;
+/// A mask whose data channel needs extra setup (RTC) holds uplink DATA
+/// until that channel is ready. If it stays unready this long the session
+/// is reconnected. The server switches such a session to a non-RTC mask
+/// after ~20 s (aivpn-server RTC_DATA_WAIT_LIMIT); this is the client-side
+/// backstop when that MaskUpdate never arrives.
+pub const MASK_NOT_READY_LIMIT: Duration = Duration::from_secs(45);
+
+/// Slow-tier verdict (see DATA_STALL_LONG_WINDOW). `window_elapsed` is the
+/// time since the long window started, which restarts whenever downlink DATA
+/// arrives; `uploaded_in_window` is uplink DATA sent inside it. Only
+/// meaningful once the data plane has been proven (the caller passes None
+/// otherwise).
+pub fn long_data_stall_verdict(
+    window_elapsed: Option<Duration>,
+    uploaded_in_window: u64,
+) -> Option<&'static str> {
+    let elapsed = window_elapsed?;
+    if elapsed >= DATA_STALL_LONG_WINDOW && uploaded_in_window >= DATA_STALL_LONG_MIN_BYTES {
+        return Some("sustained TX without data RX");
+    }
+    None
+}
+
+/// True when the mask's data channel has been unready for MASK_NOT_READY_LIMIT.
+pub fn mask_not_ready_expired(not_ready_for: Option<Duration>) -> bool {
+    not_ready_for.is_some_and(|d| d >= MASK_NOT_READY_LIMIT)
+}
 pub const CHANNEL_SIZE: usize = 8192;
 /// How long the receive loop keeps the PREVIOUS session keys accepting inbound
 /// packets after an inline rekey. Must cover the server's KeyRotate retransmit
@@ -1103,6 +1144,47 @@ mod tests {
             data_watchdog_verdict(Some(Duration::from_secs(25)), 4096),
             Some("TX without data RX")
         );
+    }
+
+    /// Regression for 02.11.2026: ~128 B/s of unanswered uplink DATA stays
+    /// under the fast tier (3.8 KiB per 30 s window) but must be caught by
+    /// the slow tier; idle junk and one-way telemetry must not.
+    #[test]
+    fn long_data_stall_catches_thin_dead_downlink_but_not_junk() {
+        let window = Some(DATA_STALL_LONG_WINDOW);
+        // The observed case: fast tier never fires...
+        assert_eq!(
+            data_watchdog_verdict(Some(Duration::from_secs(29)), 128 * 30),
+            None
+        );
+        // ...the slow tier does.
+        assert_eq!(
+            long_data_stall_verdict(window, 128 * 90),
+            Some("sustained TX without data RX")
+        );
+        // Not before the window has run out.
+        assert_eq!(
+            long_data_stall_verdict(Some(Duration::from_secs(89)), 1 << 20),
+            None
+        );
+        // Idle junk (~48 B every ~7 s) and one-way telemetry (~18 B/s).
+        assert_eq!(long_data_stall_verdict(window, 48 * 90 / 7), None);
+        assert_eq!(long_data_stall_verdict(window, 18 * 90), None);
+        assert_eq!(
+            long_data_stall_verdict(window, DATA_STALL_LONG_MIN_BYTES - 1),
+            None
+        );
+        // Data plane not proven / window not running.
+        assert_eq!(long_data_stall_verdict(None, 1 << 20), None);
+    }
+
+    #[test]
+    fn mask_not_ready_watchdog_threshold() {
+        assert!(!mask_not_ready_expired(None));
+        assert!(!mask_not_ready_expired(Some(
+            MASK_NOT_READY_LIMIT - Duration::from_millis(1)
+        )));
+        assert!(mask_not_ready_expired(Some(MASK_NOT_READY_LIMIT)));
     }
 
     #[test]

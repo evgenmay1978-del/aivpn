@@ -161,6 +161,12 @@ pub struct Session {
     /// Pending mask awaiting grace period before activation.
     /// Stored as (new_mask, timestamp_when_MaskUpdate_was_sent).
     pub pending_mask: Option<(MaskProfile, Instant)>,
+    /// Когда downlink DATA этой сессии впервые встал в ожидание готовности
+    /// RTC-маски (None — данные не ждут). Сбрасывается, как только пакет
+    /// проходит проверку готовности. Сторож в cleanup-тике переводит сессию
+    /// на не-RTC маску, если ожидание затянулось (control при этом жив,
+    /// а данные стоят — наблюдалось 02.11.2026 на 14 минут).
+    pub rtc_data_wait_since: Option<Instant>,
     /// Current FSM state
     pub fsm_state: u16,
     /// Packets in current FSM state
@@ -626,6 +632,7 @@ impl Session {
             last_server_send: now,
             mask: None,
             pending_mask: None,
+            rtc_data_wait_since: None,
             fsm_state: 0,
             fsm_packets: 0,
             fsm_state_start: now,

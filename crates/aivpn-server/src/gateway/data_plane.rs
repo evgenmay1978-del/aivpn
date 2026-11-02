@@ -369,6 +369,13 @@ impl super::Gateway {
                         .is_some_and(aivpn_common::mask_io::uses_rtc)
                         && !socket.rtc_data_ready(session.client_addr)
                     {
+                        if session.rtc_data_wait_since.is_none() {
+                            session.rtc_data_wait_since = Some(Instant::now());
+                            debug!(
+                                "Downlink: данные ждут готовности RTC-маски (peer {})",
+                                session.client_addr
+                            );
+                        }
                         if !input_closed {
                             let active = session.mask.as_ref().unwrap_or(&mask);
                             let queued = if downlink_shaping == ShapingLevel::Off {
@@ -392,6 +399,13 @@ impl super::Gateway {
                             }
                         }
                         continue;
+                    }
+                    if let Some(since) = session.rtc_data_wait_since.take() {
+                        info!(
+                            "Downlink: RTC-маска готова, ожидание данных длилось {:?} (peer {})",
+                            since.elapsed(),
+                            session.client_addr
+                        );
                     }
                     if planned.is_none() && downlink_shaping != ShapingLevel::Off {
                         session.commit_pending_mask();

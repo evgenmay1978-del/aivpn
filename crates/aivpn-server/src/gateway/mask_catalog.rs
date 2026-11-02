@@ -129,6 +129,18 @@ impl MaskCatalog {
             .next()
     }
 
+    /// Не-RTC маска для сессии, у которой RTC-канал данных так и не поднялся.
+    /// Каталог не помечается скомпрометированным: отказ RTC у одного клиента
+    /// (CGNAT, TURN, мобильная сеть) не доказывает блокировку маски для всех.
+    /// Выбор детерминирован (наименьший mask_id), чтобы узлы вели себя одинаково.
+    pub fn select_non_rtc_fallback(&self, current_mask_id: &str) -> Option<MaskProfile> {
+        self.masks
+            .iter()
+            .filter(|e| e.key() != current_mask_id && !aivpn_common::mask_io::uses_rtc(e.value()))
+            .min_by(|a, b| a.key().cmp(b.key()))
+            .map(|e| e.value().clone())
+    }
+
     /// Get mask count
     pub fn available_count(&self) -> usize {
         self.masks.len()
@@ -293,10 +305,72 @@ pub(crate) fn distinct_tag_offsets_of<'a>(
     offsets
 }
 
+/// Сколько downlink DATA может ждать готовности RTC-маски, прежде чем
+/// сервер переведёт сессию на не-RTC маску. Нормальное установление RTC
+/// укладывается в HANDSHAKE_TIME (10 с, rtc_mask.rs); 20 с — запас на
+/// переоффер клиента (каждые 2 с) и медленный TURN.
+pub(crate) const RTC_DATA_WAIT_LIMIT: Duration = Duration::from_secs(20);
+
+/// Вердикт сторожа «данные застряли в ожидании RTC». Срабатывает, только
+/// если сессия всё ещё на RTC-маске, канал так и не готов, смена маски
+/// уже не запланирована и ожидание длится не меньше RTC_DATA_WAIT_LIMIT.
+pub(crate) fn rtc_data_wait_expired(
+    wait_since: Option<Instant>,
+    on_rtc_mask: bool,
+    rtc_ready: bool,
+    mask_change_pending: bool,
+    now: Instant,
+) -> bool {
+    on_rtc_mask
+        && !rtc_ready
+        && !mask_change_pending
+        && wait_since.is_some_and(|since| now.saturating_duration_since(since) >= RTC_DATA_WAIT_LIMIT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use aivpn_common::mask::preset_masks::webrtc_zoom_v3;
+
+    #[test]
+    fn rtc_data_wait_watchdog_fires_only_on_a_stuck_rtc_data_plane() {
+        let start = Instant::now();
+        let late = start + RTC_DATA_WAIT_LIMIT;
+        let early = start + RTC_DATA_WAIT_LIMIT - Duration::from_millis(1);
+        // Застрявшее ожидание на RTC-маске: срабатывает.
+        assert!(rtc_data_wait_expired(Some(start), true, false, false, late));
+        // Ещё рано.
+        assert!(!rtc_data_wait_expired(Some(start), true, false, false, early));
+        // Данные не ждут.
+        assert!(!rtc_data_wait_expired(None, true, false, false, late));
+        // RTC уже готов.
+        assert!(!rtc_data_wait_expired(Some(start), true, true, false, late));
+        // Сессия не на RTC-маске.
+        assert!(!rtc_data_wait_expired(Some(start), false, false, false, late));
+        // Смена маски уже запланирована — не дублировать MaskUpdate.
+        assert!(!rtc_data_wait_expired(Some(start), true, false, true, late));
+    }
+
+    #[test]
+    fn non_rtc_fallback_skips_rtc_masks_and_keeps_catalog_intact() {
+        let catalog = MaskCatalog::new();
+        let rtc = webrtc_zoom_v3();
+        let quic = aivpn_common::mask::preset_masks::quic_https_v2();
+        assert!(aivpn_common::mask_io::uses_rtc(&rtc));
+        assert!(!aivpn_common::mask_io::uses_rtc(&quic));
+        catalog.register_mask(rtc.clone());
+        // Только RTC в каталоге — переходить некуда.
+        assert!(catalog.select_non_rtc_fallback(&rtc.mask_id).is_none());
+        catalog.register_mask(quic.clone());
+        let chosen = catalog
+            .select_non_rtc_fallback(&rtc.mask_id)
+            .expect("QUIC mask must be chosen");
+        assert_eq!(chosen.mask_id, quic.mask_id);
+        // Каталог не тронут: обе маски доступны всем остальным клиентам.
+        assert_eq!(catalog.available_count(), 2);
+        // Текущая маска не возвращается как замена самой себе.
+        assert!(catalog.select_non_rtc_fallback(&quic.mask_id).is_none());
+    }
 
     /// H1 regression: compromising the ONLY mask in the catalog must be
     /// refused — the old `mark_compromised` removed the mask unconditionally

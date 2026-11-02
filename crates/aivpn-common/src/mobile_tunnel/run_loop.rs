@@ -917,6 +917,13 @@ pub async fn run_tunnel_generic<P: PlatformIo>(
     // netns stand). A never-proven data plane stays covered by the handshake
     // first-contact and RX_SILENCE nets, exactly as before this watchdog.
     let mut data_plane_proven = false;
+    // Slow data-stall tier (see DATA_STALL_LONG_WINDOW): its own window,
+    // restarted by downlink DATA and by its own expiry, never by the fast
+    // tier's 30 s wash.
+    let mut long_window_started = Instant::now();
+    let mut upload_at_long_window = session.upload_bytes.load(Ordering::Relaxed);
+    // When the mask's data channel (RTC) was first seen unready.
+    let mut mask_not_ready_since: Option<Instant> = None;
 
     // Split upload into a dedicated pipeline:
     // TUN reader task -> channel -> UDP sender/encrypt task.
@@ -1406,6 +1413,8 @@ pub async fn run_tunnel_generic<P: PlatformIo>(
                             session.upload_bytes.load(Ordering::Relaxed);
                         data_stall_started = None;
                         data_stall_strikes = 0;
+                        long_window_started = last_data_rx;
+                        upload_at_long_window = upload_at_last_data_rx;
                         if !data_plane_proven {
                             data_plane_proven = true;
                             // FIX (Jul 15): this mask just carried real DATA — record it
@@ -2305,6 +2314,55 @@ pub async fn run_tunnel_generic<P: PlatformIo>(
                 {
                     data_stall_started = None;
                     upload_at_last_data_rx = uploaded_total;
+                }
+
+                // Slow tier: a thin trickle of unanswered uplink DATA that the
+                // fast tier's wash forgives every 30 s (02.11.2026: 14 min).
+                let long_elapsed = long_window_started.elapsed();
+                let long_uploaded = uploaded_total.saturating_sub(upload_at_long_window);
+                if let Some(reason) = long_data_stall_verdict(
+                    data_plane_proven.then_some(long_elapsed),
+                    long_uploaded,
+                ) {
+                    condemn_descriptor_mask_after_watchdog(
+                        &handshake_mask.mask_id,
+                        reason,
+                        data_plane_proven,
+                    );
+                    stop_data_plane(&tun, &mut tun_reader_task, &mut upload_sender_task).await;
+                    note_data_stall_and_maybe_explore(session_established);
+                    return Err(Error::Session(format!(
+                        "{}: {} bytes of uplink data unanswered for {:?} \
+                         (no downlink data for {:?}) — reconnecting",
+                        reason,
+                        long_uploaded,
+                        long_elapsed,
+                        last_data_rx.elapsed(),
+                    )));
+                }
+                if long_elapsed >= DATA_STALL_LONG_WINDOW {
+                    long_window_started = Instant::now();
+                    upload_at_long_window = uploaded_total;
+                }
+
+                // Mask data channel (RTC) never became ready: uplink DATA is
+                // held back and the server's downlink waits as well.
+                if transport.mask_data_ready() {
+                    mask_not_ready_since = None;
+                } else if mask_not_ready_since.is_none() {
+                    mask_not_ready_since = Some(Instant::now());
+                }
+                if mask_not_ready_expired(mask_not_ready_since.map(|t| t.elapsed())) {
+                    condemn_descriptor_mask_after_watchdog(
+                        &handshake_mask.mask_id,
+                        "mask data channel not ready",
+                        data_plane_proven,
+                    );
+                    stop_data_plane(&tun, &mut tun_reader_task, &mut upload_sender_task).await;
+                    return Err(Error::Session(format!(
+                        "mask data channel not ready for {:?} — reconnecting",
+                        mask_not_ready_since.map(|t| t.elapsed()).unwrap_or_default(),
+                    )));
                 }
 
                 // Absolute net: nothing decodable AT ALL (control included).

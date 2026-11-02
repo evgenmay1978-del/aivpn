@@ -367,6 +367,73 @@ impl super::Gateway {
                     // than excluding them from rotation forever.
                     mask_catalog_cleanup.sweep_expired_compromised();
 
+                    // Сторож «данные ждут RTC»: control сессии жив, а downlink
+                    // DATA стоит в ожидании готовности RTC-маски (02.11.2026:
+                    // 14 минут нулевого downlink у мобильного клиента). Такую
+                    // сессию переводим на не-RTC маску тем же MaskUpdate, что и
+                    // ротация по аномалии; каталог не трогаем.
+                    let now = Instant::now();
+                    let mut rtc_stuck: Vec<(
+                        [u8; 16],
+                        Arc<parking_lot::Mutex<Session>>,
+                        SocketAddr,
+                        String,
+                        Duration,
+                    )> = Vec::new();
+                    for entry in sessions.iter_sessions() {
+                        let s = entry.value().lock();
+                        let on_rtc = s.mask.as_ref().is_some_and(aivpn_common::mask_io::uses_rtc);
+                        if rtc_data_wait_expired(
+                            s.rtc_data_wait_since,
+                            on_rtc,
+                            on_rtc && socket.rtc_data_ready(s.client_addr),
+                            s.pending_mask.is_some(),
+                            now,
+                        ) {
+                            rtc_stuck.push((
+                                s.session_id,
+                                entry.value().clone(),
+                                s.client_addr,
+                                s.mask.as_ref().map(|m| m.mask_id.clone()).unwrap_or_default(),
+                                s.rtc_data_wait_since
+                                    .map(|t| now.saturating_duration_since(t))
+                                    .unwrap_or_default(),
+                            ));
+                        }
+                    }
+                    for (sid, session, addr, from, waited) in rtc_stuck {
+                        // Повторная попытка не раньше чем через RTC_DATA_WAIT_LIMIT.
+                        session.lock().rtc_data_wait_since = Some(now);
+                        let Some(new_mask) = mask_catalog_cleanup.select_non_rtc_fallback(&from)
+                        else {
+                            warn!(
+                                "RTC-сторож: данные {} ждут RTC {:?} (маска '{}'), не-RTC маски в каталоге нет",
+                                addr, waited, from
+                            );
+                            continue;
+                        };
+                        match sessions.build_mask_update_packets(&session, &new_mask) {
+                            Ok(packets) => match socket.send_packets_to(&packets, addr).await {
+                                Ok(_) => {
+                                    session.lock().rtc_data_wait_since = None;
+                                    sessions.update_session_mask(&sid, new_mask.clone());
+                                    warn!(
+                                        "RTC-сторож: данные {} ждали RTC {:?} — маска '{}' → '{}'",
+                                        addr, waited, from, new_mask.mask_id
+                                    );
+                                }
+                                Err(e) => warn!(
+                                    "RTC-сторож: MaskUpdate для {} не отправлен: {}",
+                                    addr, e
+                                ),
+                            },
+                            Err(e) => warn!(
+                                "RTC-сторож: MaskUpdate для {} не собран: {}",
+                                addr, e
+                            ),
+                        }
+                    }
+
                     // Enforce client revocation on ALREADY-ACTIVE sessions. The
                     // handshake scan only checks enabled/expires_at when creating a
                     // NEW session; once Active, traffic routes purely via the tag

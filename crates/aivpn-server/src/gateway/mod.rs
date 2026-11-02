@@ -66,7 +66,7 @@ mod mask_catalog;
 pub use mask_catalog::MaskCatalog;
 use mask_catalog::{
     distinct_tag_offsets_of, extract_tag_for_layout, inner_l7_prefix, packet_layout_for_mask,
-    packet_mdh_bytes_for_mask, tag_prefix_len,
+    packet_mdh_bytes_for_mask, rtc_data_wait_expired, tag_prefix_len,
 };
 
 mod security;

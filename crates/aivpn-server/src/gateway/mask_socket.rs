@@ -2493,7 +2493,7 @@ async fn drive(
                 Some((packet, data)) => {
                     match engine.send(&packet, Instant::now()) {
                         Ok(false) if !data => { let _ = crate::udp_source::send_to(&raw, &reply_sources, &packet, peer).await; }
-                        Ok(false) => {},
+                        Ok(false) => tracing::debug!("RTC не готов: пакет данных для {} отброшен", peer),
                         Ok(true) => {},
                         Err(error) => tracing::debug!("Пакет маски не принят в очередь: {}", error),
                     }
