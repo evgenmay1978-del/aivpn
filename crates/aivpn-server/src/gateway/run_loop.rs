@@ -394,7 +394,10 @@ impl super::Gateway {
                                 s.session_id,
                                 entry.value().clone(),
                                 s.client_addr,
-                                s.mask.as_ref().map(|m| m.mask_id.clone()).unwrap_or_default(),
+                                s.mask
+                                    .as_ref()
+                                    .map(|m| m.mask_id.clone())
+                                    .unwrap_or_default(),
                                 s.rtc_data_wait_since
                                     .map(|t| now.saturating_duration_since(t))
                                     .unwrap_or_default(),
@@ -422,15 +425,11 @@ impl super::Gateway {
                                         addr, waited, from, new_mask.mask_id
                                     );
                                 }
-                                Err(e) => warn!(
-                                    "RTC-сторож: MaskUpdate для {} не отправлен: {}",
-                                    addr, e
-                                ),
+                                Err(e) => {
+                                    warn!("RTC-сторож: MaskUpdate для {} не отправлен: {}", addr, e)
+                                }
                             },
-                            Err(e) => warn!(
-                                "RTC-сторож: MaskUpdate для {} не собран: {}",
-                                addr, e
-                            ),
+                            Err(e) => warn!("RTC-сторож: MaskUpdate для {} не собран: {}", addr, e),
                         }
                     }
 

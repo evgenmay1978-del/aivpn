@@ -324,7 +324,8 @@ pub(crate) fn rtc_data_wait_expired(
     on_rtc_mask
         && !rtc_ready
         && !mask_change_pending
-        && wait_since.is_some_and(|since| now.saturating_duration_since(since) >= RTC_DATA_WAIT_LIMIT)
+        && wait_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= RTC_DATA_WAIT_LIMIT)
 }
 
 #[cfg(test)]
@@ -340,13 +341,25 @@ mod tests {
         // Застрявшее ожидание на RTC-маске: срабатывает.
         assert!(rtc_data_wait_expired(Some(start), true, false, false, late));
         // Ещё рано.
-        assert!(!rtc_data_wait_expired(Some(start), true, false, false, early));
+        assert!(!rtc_data_wait_expired(
+            Some(start),
+            true,
+            false,
+            false,
+            early
+        ));
         // Данные не ждут.
         assert!(!rtc_data_wait_expired(None, true, false, false, late));
         // RTC уже готов.
         assert!(!rtc_data_wait_expired(Some(start), true, true, false, late));
         // Сессия не на RTC-маске.
-        assert!(!rtc_data_wait_expired(Some(start), false, false, false, late));
+        assert!(!rtc_data_wait_expired(
+            Some(start),
+            false,
+            false,
+            false,
+            late
+        ));
         // Смена маски уже запланирована — не дублировать MaskUpdate.
         assert!(!rtc_data_wait_expired(Some(start), true, false, true, late));
     }
