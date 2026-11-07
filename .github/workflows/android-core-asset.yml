@@ -1,0 +1,95 @@
+name: Android core asset (MaestroVPN pin)
+
+# One-off build for MaestroVPN: libaivpn_core.so from the PINNED source commit below
+# (master 809f827 = v1.2.0 + DSH throughput patches + dead-downlink watchdogs, PR #11).
+# Same steps as build-android-release-asset; the APK wrapper is debug-signed
+# (AIVPN_ALLOW_DEBUG_APK=1) because only lib/<abi>/libaivpn_core.so is consumed:
+# MaestroVPN repackages it into its own fleet-signed APK and pins every sha256.
+# The prerelease is created with GITHUB_TOKEN, so it triggers no other workflow.
+
+on:
+  push:
+    branches: [ci/android-core-809f827]
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_SHA: 809f827214fa12f904a601b5207beb391f7e34a1
+  RELEASE_TAG: android-core-809f827
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pinned source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android NDK and build prerequisites
+        run: |
+          sdkmanager "ndk;27.2.12479018"
+          cargo install cargo-ndk
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          rustc --version; cargo --version; cargo ndk --version
+
+      - name: Build Android APK (release .so, debug-signed wrapper)
+        env:
+          AIVPN_ALLOW_DEBUG_APK: '1'
+        run: make android ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
+
+      - name: Verify and hash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          apk=releases/aivpn-android.apk
+          mkdir -p out/lib
+          for abi in arm64-v8a armeabi-v7a; do
+            unzip -p "$apk" "lib/$abi/libaivpn_core.so" > "out/lib/$abi.so"
+            test -s "out/lib/$abi.so"
+            python3 deploy/ci/check-android-jni.py "out/lib/$abi.so"
+          done
+          cp "$apk" out/aivpn-android.apk
+          {
+            echo "source $SOURCE_SHA"
+            echo "apk $(sha256sum out/aivpn-android.apk | cut -d' ' -f1) $(stat -c%s out/aivpn-android.apk)"
+            for abi in arm64-v8a armeabi-v7a; do
+              echo "$abi $(sha256sum "out/lib/$abi.so" | cut -d' ' -f1) $(stat -c%s "out/lib/$abi.so")"
+            done
+          } | tee out/SHA256SUMS.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aivpn-android-core-809f827
+          path: |
+            out/aivpn-android.apk
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $RELEASE_TAG already exists - refusing to overwrite pinned assets"; exit 1
+          fi
+          gh release create "$RELEASE_TAG" out/aivpn-android.apk out/SHA256SUMS.txt \
+            -R "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false \
+            --title "Android core 809f827 (MaestroVPN pin)" \
+            --notes "libaivpn_core.so built from $SOURCE_SHA (v1.2.0 + DSH patches + dead-downlink watchdogs). Debug-signed APK wrapper; consumers take only lib/<abi>/libaivpn_core.so. Hashes: SHA256SUMS.txt."
