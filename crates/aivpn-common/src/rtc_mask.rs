@@ -55,6 +55,23 @@ pub fn is_wire_packet(packet: &[u8]) -> bool {
     }
 }
 
+/// Кладёт готовый к отправке кадр RTC в очередь выхода.
+///
+/// Переполнение очереди и кадр больше бюджета маски — это перегрузка канала,
+/// а не сломанное состояние сессии: `send()` на том же пределе `QUEUE`
+/// отвечает `WouldBlock`, и вызывающий слой отбрасывает DATA-пакет
+/// (mask_socket: «RTC не готов: пакет данных … отброшен»). Пока `drain`
+/// возвращал здесь `InvalidPacket`, движок RTC умирал целиком: downlink
+/// стоял 20 с до сторожа `RTC_DATA_WAIT_LIMIT`, клиент уходил в
+/// перерукопожатие и сессия восстанавливалась только через ~30-50 с.
+fn queue_transmit(wire: &mut VecDeque<Vec<u8>>, contents: &[u8]) -> bool {
+    if contents.is_empty() || contents.len() > WIRE_BUDGET || wire.len() >= QUEUE {
+        return false;
+    }
+    wire.push_back(contents.to_vec());
+    true
+}
+
 pub struct RtcMask {
     rtc: Rtc,
     local: SocketAddr,
@@ -451,14 +468,27 @@ impl RtcMask {
                         }
                         continue;
                     }
-                    if packet.contents.len() > WIRE_BUDGET || self.wire.len() >= QUEUE {
-                        return Err(Error::InvalidPacket("Превышен бюджет выхода RTC"));
+                    if !queue_transmit(&mut self.wire, &packet.contents) {
+                        tracing::debug!(
+                            "RTC: кадр выхода отброшен (очередь {}/{}, кадр {} байт)",
+                            self.wire.len(),
+                            QUEUE,
+                            packet.contents.len()
+                        );
                     }
-                    self.wire.push_back(packet.contents.to_vec());
                 }
                 Output::Event(Event::RtpPacket(packet)) => {
+                    // Та же политика, что и на выходе: перегруз или негабаритный
+                    // кадр — потеря одного пакета, а не смерть всего движка.
                     if packet.payload.len() > MAX_INNER || self.payloads.len() >= QUEUE {
-                        return Err(Error::InvalidPacket("Превышен бюджет приема RTC"));
+                        tracing::debug!(
+                            "RTC: кадр приёма отброшен (очередь {}/{}, кадр {} байт, предел {} байт)",
+                            self.payloads.len(),
+                            QUEUE,
+                            packet.payload.len(),
+                            MAX_INNER
+                        );
+                        continue;
                     }
                     self.payloads.push_back(packet.payload.to_vec());
                 }
@@ -529,6 +559,24 @@ mod tests {
     use super::*;
     use std::collections::{HashSet, VecDeque};
     use std::time::Duration;
+
+    #[test]
+    fn transmit_overflow_is_backpressure_and_must_not_kill_the_engine() {
+        // Политика очереди выхода: перегруз — потеря кадра, а не смерть движка.
+        let mut wire: VecDeque<Vec<u8>> = VecDeque::new();
+        assert!(queue_transmit(&mut wire, &[1, 2, 3]));
+        assert_eq!(wire.len(), 1);
+        // Кадр больше бюджета маски в провод не влезает и отбрасывается.
+        assert!(!queue_transmit(&mut wire, &vec![0; WIRE_BUDGET + 1]));
+        assert_eq!(wire.len(), 1, "негабаритный кадр не попадает в очередь");
+        // Полная очередь — перегрузка: кадр теряется, очередь не растёт.
+        let mut full: VecDeque<Vec<u8>> = (0..QUEUE).map(|_| vec![7]).collect();
+        assert!(!queue_transmit(&mut full, &[9]));
+        assert_eq!(full.len(), QUEUE);
+        // Пустой кадр не ставим в очередь.
+        assert!(!queue_transmit(&mut wire, &[]));
+        assert_eq!(wire.len(), 1);
+    }
 
     #[test]
     fn boundary_payloads_fit_both_directions_before_and_after_rtcp_reports() {

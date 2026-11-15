@@ -1774,7 +1774,9 @@ impl MaskSocket {
             )
             .await
             {
-                tracing::debug!("Движок RTC завершен: {}", error);
+                // Смерть RTC-движка = обрыв downlink до перерукопожатия: событие
+                // должно быть видно и при log_level=info, не только в диагностике.
+                tracing::warn!("Движок RTC завершен: {}", error);
             }
             peers.remove_if(&peer, |_, current| {
                 generation
